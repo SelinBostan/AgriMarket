@@ -1,6 +1,6 @@
 // --- backend/server.js ---
 // Professional Agricultural Marketplace API
-// Requires: npm install express mssql cors body-parser
+// Requires: npm install express mssql cors
 
 const express = require('express');
 const sql = require('mssql');
@@ -34,6 +34,20 @@ const sendResponse = (res, success, data = null, message = '', statusCode = 200)
   });
 };
 
+// --- HELPER: Map DB Columns to Frontend State ---
+const mapUser = (dbUser) => {
+  if (!dbUser) return null;
+  return {
+    id: dbUser.UserID,
+    name: dbUser.Name,
+    surname: dbUser.Surname,
+    email: dbUser.Email,
+    role: dbUser.Role,
+    picture: dbUser.ProfilePicture,
+    createdAt: dbUser.CreatedAt
+  };
+};
+
 const poolPromise = sql.connect(dbConfig)
   .then(pool => {
     console.log('✅ Connected to MSSQL Database');
@@ -44,373 +58,236 @@ const poolPromise = sql.connect(dbConfig)
     process.exit(1);
   });
 
-/**
- * 1. USER PROFILE & AUTH WITH VALIDATION
- */
-
-// INPUT VALIDATION HELPERS
-const validateEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-const validatePassword = (pwd) => pwd && pwd.length >= 6;
-const sanitizeInput = (input) => input ? input.trim().substring(0, 500) : '';
-
-// UPDATE User Profile
-app.put('/api/users/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { name, surname, role, picture } = req.body;
-
-    if (!name || name.trim().length < 2) {
-      return sendResponse(res, false, null, 'Ad en az 2 karakter olmalı', 400);
-    }
-    if (picture && picture.length > 1000000) {
-      return sendResponse(res, false, null, 'Resim çok büyük', 400);
-    }
-
-    const pool = await poolPromise;
-    await pool.request()
-      .input('UserID', sql.Int, parseInt(userId))
-      .input('Name', sql.NVarChar, sanitizeInput(name))
-      .input('Surname', sql.NVarChar, sanitizeInput(surname || ''))
-      .input('Role', sql.NVarChar, role || 'Buyer')
-      .input('ProfilePicture', sql.NVarChar, picture || null)
-      .query(`
-        UPDATE Users 
-        SET Name = @Name, Surname = @Surname, Role = @Role, ProfilePicture = @ProfilePicture, UpdatedAt = GETDATE()
-        WHERE UserID = @UserID
-      `);
-    
-    sendResponse(res, true, null, 'Profil başarıyla güncellendi');
-  } catch (err) {
-    console.error(err);
-    sendResponse(res, false, null, 'Profil güncelleme hatası', 500);
-  }
+// --- BASE ROUTES ---
+app.get('/', (req, res) => {
+  res.send('AgriMarket API is running.');
 });
 
-// GET User Profile
-app.get('/api/users/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const pool = await poolPromise;
-    const result = await pool.request()
-      .input('UserID', sql.Int, parseInt(userId))
-      .query('SELECT UserID as id, Name as name, Surname as surname, Email as email, Role as role, ProfilePicture as picture FROM Users WHERE UserID = @UserID');
-    
-    if (result.recordset.length === 0) {
-      return sendResponse(res, false, null, 'Kullanıcı bulunamadı', 404);
-    }
-    sendResponse(res, true, result.recordset[0]);
-  } catch (err) {
-    sendResponse(res, false, null, 'Kullanıcı getirme hatası', 500);
-  }
-});
+// --- AUTH ENDPOINTS ---
 
-// LOGIN
-app.post('/api/login', async (req, res) => {
-  const { email, password } = req.body;
-  
-  if (!validateEmail(email)) {
-    return sendResponse(res, false, null, 'Geçerli e-posta girin', 400);
-  }
-  if (!validatePassword(password)) {
-    return sendResponse(res, false, null, 'Geçerli şifre girin', 400);
-  }
-
-  try {
-    const pool = await poolPromise;
-    const result = await pool.request()
-      .input('Email', sql.NVarChar, email)
-      .query('SELECT UserID, Name, Surname, Email, PasswordHash, Role, ProfilePicture FROM Users WHERE Email = @Email');
-
-    const user = result.recordset[0];
-    if (user && user.PasswordHash === password) {
-      sendResponse(res, true, { 
-        user: { 
-          id: user.UserID, 
-          name: user.Name, 
-          surname: user.Surname,
-          email: user.Email, 
-          role: user.Role,
-          picture: user.ProfilePicture 
-        } 
-      });
-    } else {
-      sendResponse(res, false, null, 'Hatalı e-posta veya şifre', 401);
-    }
-  } catch (err) {
-    sendResponse(res, false, null, 'Giriş hatası', 500);
-  }
-});
-
-// REGISTER
 app.post('/api/register', async (req, res) => {
-  const { name, surname, email, password } = req.body;
-  
-  if (!name || name.trim().length < 2) {
-    return sendResponse(res, false, null, 'Ad en az 2 karakter olmalı', 400);
-  }
-  if (!validateEmail(email)) {
-    return sendResponse(res, false, null, 'Geçerli e-posta girin', 400);
-  }
-  if (!validatePassword(password)) {
-    return sendResponse(res, false, null, 'Şifre en az 6 karakter olmalı', 400);
+  const { Name, Surname, Email, Password, Role, name, surname, email, password, role } = req.body;
+  const uName = Name || name;
+  const uSurname = Surname || surname;
+  const uEmail = Email || email;
+  const uPassword = Password || password;
+  const uRole = Role || role || 'Buyer';
+
+  if (!uName || !uEmail || !uPassword) {
+    return sendResponse(res, false, null, 'Eksik bilgi.', 400);
   }
 
   try {
     const pool = await poolPromise;
-    const checkUser = await pool.request()
-      .input('Email', sql.NVarChar, email)
-      .query('SELECT UserID, Name, Surname, Role, ProfilePicture FROM Users WHERE Email = @Email');
-
-    if (checkUser.recordset.length > 0) {
-      const u = checkUser.recordset[0];
-      return sendResponse(res, true, { 
-        user: { id: u.UserID, name: u.Name, surname: u.Surname, email: email, role: u.Role, picture: u.ProfilePicture }
-      }, 'Hesap zaten var');
+    const check = await pool.request()
+      .input('Email', sql.NVarChar, uEmail)
+      .query('SELECT * FROM Users WHERE Email = @Email');
+      
+    if (check.recordset.length > 0) {
+      return sendResponse(res, false, null, 'Bu e-posta zaten kayıtlı.', 400);
     }
 
     const result = await pool.request()
-      .input('Name', sql.NVarChar, sanitizeInput(name))
-      .input('Surname', sql.NVarChar, sanitizeInput(surname || ''))
-      .input('Email', sql.NVarChar, email)
-      .input('PasswordHash', sql.NVarChar, password) 
+      .input('Name', sql.NVarChar, uName)
+      .input('Surname', sql.NVarChar, uSurname)
+      .input('Email', sql.NVarChar, uEmail)
+      .input('PasswordHash', sql.NVarChar, uPassword)
+      .input('Role', sql.NVarChar, uRole)
       .query(`
         INSERT INTO Users (Name, Surname, Email, PasswordHash, Role, CreatedAt)
-        VALUES (@Name, @Surname, @Email, @PasswordHash, 'Buyer', GETDATE());
-        SELECT SCOPE_IDENTITY() AS id;
+        OUTPUT inserted.*
+        VALUES (@Name, @Surname, @Email, @PasswordHash, @Role, GETDATE())
       `);
-    
-    const newId = result.recordset[0].id;
-    sendResponse(res, true, { 
-      user: { id: newId, name: sanitizeInput(name), surname: sanitizeInput(surname || ''), email: email, role: 'Buyer', picture: null }
-    }, 'Kayıt başarılı');
+
+    sendResponse(res, true, { user: mapUser(result.recordset[0]) }, 'Kayıt başarılı!');
   } catch (err) {
-    sendResponse(res, false, null, 'Kayıt hatası', 500);
+    console.error("Register Error:", err);
+    sendResponse(res, false, null, 'Kayıt hatası: ' + err.message, 500);
   }
 });
 
-/**
- * 2. PRODUCTS WITH FULL CRUD
- */
+app.post('/api/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  try {
+    const pool = await poolPromise;
+    const result = await pool.request()
+      .input('Email', sql.NVarChar, email)
+      .input('PasswordHash', sql.NVarChar, password)
+      .query(`SELECT * FROM Users WHERE Email = @Email AND PasswordHash = @PasswordHash`);
+
+    if (result.recordset.length > 0) {
+      const user = mapUser(result.recordset[0]);
+      sendResponse(res, true, { user }, 'Giriş başarılı');
+    } else {
+      sendResponse(res, false, null, 'E-posta veya şifre hatalı.', 401);
+    }
+  } catch (err) {
+    sendResponse(res, false, null, 'Giriş hatası: ' + err.message, 500);
+  }
+});
+
+// --- PRODUCT ENDPOINTS (UPDATED FOR B2B) ---
 
 app.get('/api/products', async (req, res) => {
   try {
-    const { category, search, minPrice, maxPrice } = req.query;
-    let query = 'SELECT * FROM Products WHERE 1=1';
-    const request = (await poolPromise).request();
-
-    if (category && category !== 'Tümü') {
-      query += ' AND Category = @Category';
-      request.input('Category', sql.NVarChar, category);
-    }
-    if (search) {
-      query += ' AND (Name LIKE @Search OR Description LIKE @Search)';
-      request.input('Search', sql.NVarChar, `%${sanitizeInput(search).substring(0, 100)}%`);
-    }
-    if (minPrice) {
-      query += ' AND Price >= @MinPrice';
-      request.input('MinPrice', sql.Decimal(10, 2), parseFloat(minPrice));
-    }
-    if (maxPrice) {
-      query += ' AND Price <= @MaxPrice';
-      request.input('MaxPrice', sql.Decimal(10, 2), parseFloat(maxPrice));
-    }
-
-    query += ' ORDER BY CreatedAt DESC';
-    const result = await request.query(query);
-    sendResponse(res, true, result.recordset || []);
-  } catch (err) { 
-    sendResponse(res, false, null, 'Ürün getirme hatası', 500);
+    const pool = await poolPromise;
+    // Added Unit and MOQ to select
+    const result = await pool.request().query('SELECT * FROM Products ORDER BY CreatedAt DESC');
+    sendResponse(res, true, result.recordset);
+  } catch (err) {
+    sendResponse(res, false, null, 'Ürünler getirilemedi', 500);
   }
 });
 
-app.get('/api/products/seller/:sellerId', async (req, res) => {
-  const { sellerId } = req.params;
+app.get('/api/products/seller/:id', async (req, res) => {
   try {
     const pool = await poolPromise;
     const result = await pool.request()
-      .input('SellerID', sql.Int, parseInt(sellerId))
+      .input('SellerID', sql.Int, req.params.id)
       .query('SELECT * FROM Products WHERE SellerID = @SellerID ORDER BY CreatedAt DESC');
-    sendResponse(res, true, result.recordset || []);
-  } catch (err) { 
-    sendResponse(res, false, null, 'Satıcı ürünleri getirme hatası', 500);
-  }
-});
-
-app.get('/api/products/:productId', async (req, res) => {
-  const { productId } = req.params;
-  try {
-    const pool = await poolPromise;
-    const result = await pool.request()
-      .input('ProductID', sql.Int, parseInt(productId))
-      .query('SELECT * FROM Products WHERE ProductID = @ProductID');
-    
-    if (result.recordset.length === 0) {
-      return sendResponse(res, false, null, 'Ürün bulunamadı', 404);
-    }
-    sendResponse(res, true, result.recordset[0]);
-  } catch (err) { 
-    sendResponse(res, false, null, 'Ürün getirme hatası', 500);
+    sendResponse(res, true, result.recordset);
+  } catch (err) {
+    sendResponse(res, false, null, 'Satıcı ürünleri getirilemedi', 500);
   }
 });
 
 app.post('/api/products', async (req, res) => {
-  const { name, category, price, description, imageUrl, supplier, sellerId } = req.body;
-  
-  if (!name || name.trim().length < 3) {
-    return sendResponse(res, false, null, 'Ürün adı en az 3 karakter olmalı', 400);
-  }
-  if (!price || parseFloat(price) <= 0) {
-    return sendResponse(res, false, null, 'Geçerli fiyat girin', 400);
-  }
-  if (!imageUrl) {
-    return sendResponse(res, false, null, 'Ürün görseli gerekli', 400);
-  }
-  if (!description || description.trim().length < 10) {
-    return sendResponse(res, false, null, 'Açıklama en az 10 karakter olmalı', 400);
-  }
-
-  try {
-    const pool = await poolPromise;
-    const result = await pool.request()
-      .input('Name', sql.NVarChar, sanitizeInput(name))
-      .input('Category', sql.NVarChar, category || 'Tahıllar')
-      .input('Price', sql.Decimal(10, 2), parseFloat(price))
-      .input('Description', sql.NVarChar, sanitizeInput(description))
-      .input('ImageUrl', sql.NVarChar, imageUrl.substring(0, 1000))
-      .input('Supplier', sql.NVarChar, sanitizeInput(supplier))
-      .input('SellerID', sql.Int, parseInt(sellerId))
-      .query(`
-        INSERT INTO Products (Name, Category, Price, Description, ImageUrl, Supplier, SellerID, Rating, ReviewsCount, CreatedAt)
-        VALUES (@Name, @Category, @Price, @Description, @ImageUrl, @Supplier, @SellerID, 5.0, 0, GETDATE());
-        SELECT SCOPE_IDENTITY() AS id;
-      `);
-    
-    sendResponse(res, true, { id: result.recordset[0].id }, 'Ürün başarıyla oluşturuldu');
-  } catch (err) { 
-    console.error(err);
-    sendResponse(res, false, null, 'Ürün oluşturma hatası', 500);
-  }
-});
-
-app.put('/api/products/:productId', async (req, res) => {
-  const { productId } = req.params;
-  const { name, category, price, description } = req.body;
-  
+  // Added unit and moq destructuring
+  const { name, category, price, description, imageUrl, sellerId, supplier, unit, moq } = req.body;
   try {
     const pool = await poolPromise;
     await pool.request()
-      .input('ProductID', sql.Int, parseInt(productId))
-      .input('Name', sql.NVarChar, sanitizeInput(name))
+      .input('Name', sql.NVarChar, name)
       .input('Category', sql.NVarChar, category)
-      .input('Price', sql.Decimal(10, 2), parseFloat(price))
-      .input('Description', sql.NVarChar, sanitizeInput(description))
+      .input('Price', sql.Decimal(10, 2), price)
+      .input('Description', sql.NVarChar, description)
+      .input('ImageUrl', sql.NVarChar, imageUrl) 
+      .input('SellerID', sql.Int, sellerId)
+      .input('Supplier', sql.NVarChar, supplier)
+      // New B2B Inputs
+      .input('Unit', sql.NVarChar, unit || 'Ton')
+      .input('MOQ', sql.Int, moq || 1)
       .query(`
-        UPDATE Products 
-        SET Name = @Name, Category = @Category, Price = @Price, Description = @Description
-        WHERE ProductID = @ProductID
+        INSERT INTO Products (Name, Category, Price, Description, ImageUrl, SellerID, Supplier, Unit, MOQ, CreatedAt)
+        VALUES (@Name, @Category, @Price, @Description, @ImageUrl, @SellerID, @Supplier, @Unit, @MOQ, GETDATE())
       `);
-    
-    sendResponse(res, true, null, 'Ürün başarıyla güncellendi');
-  } catch (err) { 
-    sendResponse(res, false, null, 'Ürün güncelleme hatası', 500);
+    sendResponse(res, true, null, 'Ürün eklendi');
+  } catch (err) {
+    console.error(err);
+    sendResponse(res, false, null, 'Ürün ekleme hatası', 500);
   }
 });
 
-/**
- * 3. ORDERS MANAGEMENT
- */
+// --- ORDER ENDPOINTS ---
 
 app.post('/api/orders', async (req, res) => {
-  const { userId, items, total } = req.body;
-  
-  if (!userId || !items || items.length === 0) {
-    return sendResponse(res, false, null, 'Geçersiz sipariş', 400);
-  }
-  if (!total || total <= 0) {
-    return sendResponse(res, false, null, 'Geçerli toplam girin', 400);
-  }
-
+  const { userId, totalPrice, items } = req.body;
   try {
     const pool = await poolPromise;
-    const itemsJson = JSON.stringify(items);
-    
-    const result = await pool.request()
-      .input('UserID', sql.Int, parseInt(userId))
-      .input('Items', sql.NVarChar, itemsJson)
-      .input('Total', sql.Decimal(10, 2), parseFloat(total))
-      .input('Status', sql.NVarChar, 'Pending')
-      .query(`
-        INSERT INTO Orders (UserID, Items, Total, Status, CreatedAt)
-        VALUES (@UserID, @Items, @Total, @Status, GETDATE());
-        SELECT SCOPE_IDENTITY() AS id;
-      `);
-    
-    sendResponse(res, true, { orderId: result.recordset[0].id }, 'Sipariş başarıyla oluşturuldu');
+    const transaction = new sql.Transaction(pool);
+    await transaction.begin();
+
+    try {
+      const orderRequest = new sql.Request(transaction);
+      const orderResult = await orderRequest
+        .input('UserID', sql.Int, userId)
+        .input('TotalPrice', sql.Decimal(10, 2), totalPrice)
+        .query(`
+          INSERT INTO Orders (UserID, TotalPrice, Status, CreatedAt)
+          OUTPUT inserted.OrderID
+          VALUES (@UserID, @TotalPrice, 'Bekliyor', GETDATE())
+        `);
+      
+      const orderId = orderResult.recordset[0].OrderID;
+
+      for (const item of items) {
+        const detailRequest = new sql.Request(transaction);
+        await detailRequest
+          .input('OrderID', sql.Int, orderId)
+          .input('ProductID', sql.Int, item.id || item.ProductID)
+          .input('Quantity', sql.Int, item.qty)
+          .input('UnitPrice', sql.Decimal(10, 2), item.price || item.Price)
+          .query(`
+            INSERT INTO OrderDetails (OrderID, ProductID, Quantity, UnitPrice)
+            VALUES (@OrderID, @ProductID, @Quantity, @UnitPrice)
+          `);
+      }
+
+      await transaction.commit();
+      sendResponse(res, true, { orderId }, 'Sipariş oluşturuldu');
+    } catch (err) {
+      await transaction.rollback();
+      throw err;
+    }
   } catch (err) {
     console.error(err);
-    sendResponse(res, false, null, 'Sipariş oluşturma hatası', 500);
+    sendResponse(res, false, null, 'Sipariş hatası', 500);
   }
 });
 
 app.get('/api/orders/:userId', async (req, res) => {
-  const { userId } = req.params;
-  
   try {
     const pool = await poolPromise;
     const result = await pool.request()
-      .input('UserID', sql.Int, parseInt(userId))
+      .input('UserID', sql.Int, req.params.userId)
       .query('SELECT * FROM Orders WHERE UserID = @UserID ORDER BY CreatedAt DESC');
-    
-    sendResponse(res, true, result.recordset || []);
+    sendResponse(res, true, result.recordset);
   } catch (err) {
-    sendResponse(res, false, null, 'Siparişler getirme hatası', 500);
+    sendResponse(res, false, null, 'Sipariş geçmişi hatası', 500);
   }
 });
 
-app.get('/api/orders/:orderId/details', async (req, res) => {
-  const { orderId } = req.params;
-  
+// --- USER ENDPOINTS ---
+
+app.put('/api/users/:id', async (req, res) => {
+  const { name, surname, role, picture } = req.body;
   try {
     const pool = await poolPromise;
-    const result = await pool.request()
-      .input('OrderID', sql.Int, parseInt(orderId))
-      .query('SELECT * FROM Orders WHERE OrderID = @OrderID');
-    
-    if (result.recordset.length === 0) {
-      return sendResponse(res, false, null, 'Sipariş bulunamadı', 404);
-    }
-    
-    const order = result.recordset[0];
-    order.Items = JSON.parse(order.Items);
-    sendResponse(res, true, order);
+    await pool.request()
+      .input('UserID', sql.Int, req.params.id)
+      .input('Name', sql.NVarChar, name)
+      .input('Surname', sql.NVarChar, surname)
+      .input('Role', sql.NVarChar, role)
+      .input('ProfilePicture', sql.NVarChar, picture)
+      .query(`
+        UPDATE Users 
+        SET Name = @Name, Surname = @Surname, Role = @Role, ProfilePicture = @ProfilePicture
+        WHERE UserID = @UserID
+      `);
+    sendResponse(res, true, null, 'Profil güncellendi');
   } catch (err) {
-    sendResponse(res, false, null, 'Sipariş detayı getirme hatası', 500);
+    console.error("Profile Update Error:", err);
+    sendResponse(res, false, null, 'Güncelleme hatası', 500);
   }
 });
 
-/**
- * 4. REVIEWS & RATINGS
- */
+app.get('/api/users', async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const result = await pool.request().query('SELECT * FROM Users');
+    sendResponse(res, true, result.recordset);
+  } catch (err) {
+    console.error(err);
+    sendResponse(res, false, null, 'Kullanıcıları getirme hatası', 500);
+  }
+});
+
+// --- REVIEW ENDPOINTS ---
 
 app.post('/api/reviews', async (req, res) => {
   const { productId, userId, rating, comment } = req.body;
-  
-  if (!productId || !userId || !rating || rating < 1 || rating > 5) {
-    return sendResponse(res, false, null, 'Geçersiz değerlendirme', 400);
-  }
-
   try {
     const pool = await poolPromise;
     await pool.request()
       .input('ProductID', sql.Int, parseInt(productId))
       .input('UserID', sql.Int, parseInt(userId))
       .input('Rating', sql.Int, parseInt(rating))
-      .input('Comment', sql.NVarChar, sanitizeInput(comment || ''))
+      .input('Comment', sql.NVarChar, comment || '')
       .query(`
         INSERT INTO Reviews (ProductID, UserID, Rating, Comment, CreatedAt)
         VALUES (@ProductID, @UserID, @Rating, @Comment, GETDATE())
       `);
-    
     sendResponse(res, true, null, 'Değerlendirme eklendi');
   } catch (err) {
     sendResponse(res, false, null, 'Değerlendirme ekleme hatası', 500);
@@ -419,31 +296,76 @@ app.post('/api/reviews', async (req, res) => {
 
 app.get('/api/products/:productId/reviews', async (req, res) => {
   const { productId } = req.params;
-  
   try {
     const pool = await poolPromise;
     const result = await pool.request()
       .input('ProductID', sql.Int, parseInt(productId))
       .query(`
-        SELECT r.*, u.Name, u.ProfilePicture 
+        SELECT r.*, u.Name, u.Surname, u.ProfilePicture 
         FROM Reviews r
         JOIN Users u ON r.UserID = u.UserID
         WHERE r.ProductID = @ProductID
         ORDER BY r.CreatedAt DESC
       `);
-    
     sendResponse(res, true, result.recordset || []);
   } catch (err) {
-    sendResponse(res, false, null, 'Değerlendirmeler getirme hatası', 500);
+    sendResponse(res, true, []);
   }
 });
 
-/**
- * 5. HEALTH CHECK
- */
+// --- FAVORITES & MESSAGES ---
 
-app.get('/api/health', (req, res) => {
-  sendResponse(res, true, { status: 'healthy' }, 'Server çalışıyor');
+app.post('/api/favorites/toggle', async (req, res) => {
+  const { userId, productId } = req.body;
+  try {
+    const pool = await poolPromise;
+    const check = await pool.request()
+      .input('UserID', sql.Int, userId)
+      .input('ProductID', sql.Int, productId)
+      .query('SELECT * FROM Favorites WHERE UserID = @UserID AND ProductID = @ProductID');
+
+    if (check.recordset.length > 0) {
+      await pool.request()
+        .input('UserID', sql.Int, userId)
+        .input('ProductID', sql.Int, productId)
+        .query('DELETE FROM Favorites WHERE UserID = @UserID AND ProductID = @ProductID');
+      sendResponse(res, true, { action: 'removed' }, 'Favorilerden çıkarıldı');
+    } else {
+      await pool.request()
+        .input('UserID', sql.Int, userId)
+        .input('ProductID', sql.Int, productId)
+        .query('INSERT INTO Favorites (UserID, ProductID) VALUES (@UserID, @ProductID)');
+      sendResponse(res, true, { action: 'added' }, 'Favorilere eklendi');
+    }
+  } catch (err) {
+    console.error(err);
+    sendResponse(res, false, null, 'Favori işlemi hatası', 500);
+  }
+});
+
+app.get('/api/favorites/:userId', async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const result = await pool.request()
+      .input('UserID', sql.Int, req.params.userId)
+      // Updated query to fetch Unit and MOQ for favorites too
+      .query(`
+        SELECT p.*, f.FavoriteID, f.CreatedAt as FavDate
+        FROM Favorites f
+        JOIN Products p ON f.ProductID = p.ProductID
+        WHERE f.UserID = @UserID
+        ORDER BY f.CreatedAt DESC
+      `);
+    sendResponse(res, true, result.recordset);
+  } catch (err) {
+    console.error(err);
+    sendResponse(res, false, null, 'Favoriler getirilemedi', 500);
+  }
+});
+
+app.post('/api/messages', async (req, res) => {
+    // Basic placeholder for messaging
+    sendResponse(res, true);
 });
 
 const PORT = 5000;
